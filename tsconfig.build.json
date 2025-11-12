@@ -3,7 +3,8 @@
   "compilerOptions": {
     "noEmit": false,
     "allowImportingTsExtensions": false,
-    "outDir": "lib",
+    // "outDir": "lib",
+    "outDir": "../neoxr-bot/node_modules/baileys/lib",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true
