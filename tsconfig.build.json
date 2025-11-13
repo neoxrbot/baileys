@@ -4,7 +4,8 @@
     "noEmit": false,
     "allowImportingTsExtensions": false,
     // "outDir": "lib",
-    "outDir": "../neoxr-bot/node_modules/baileys/lib",
+    // "outDir": "../neoxr-bot/node_modules/baileys/lib",
+    "outDir": "../A/lib",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true
