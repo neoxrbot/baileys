@@ -84,7 +84,7 @@ export const MEDIA_PATH_MAP: { [T in MediaType]?: string } = {
 	'md-app-state': '',
 	'md-msg-hist': '/mms/md-app-state',
 	'biz-cover-photo': '/pps/biz-cover-photo'
-}
+} 
 
 export const MEDIA_HKDF_KEY_MAPPING = {
 	audio: 'Audio',
