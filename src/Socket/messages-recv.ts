@@ -3,13 +3,14 @@ import { Boom } from '@hapi/boom'
 import { randomBytes } from 'crypto'
 import Long from 'long'
 import { proto } from '../../WAProto/index.js'
-import { DEFAULT_CACHE_TTLS, KEY_BUNDLE_TYPE, MIN_PREKEY_COUNT } from '../Defaults'
+import { DEFAULT_CACHE_TTLS, KEY_BUNDLE_TYPE, PLACEHOLDER_MAX_AGE_SECONDS, MIN_PREKEY_COUNT, STATUS_EXPIRY_SECONDS } from '../Defaults'
 import type {
 	MessageReceiptType,
 	MessageRelayOptions,
 	MessageUserReceipt,
 	SocketConfig,
 	WACallEvent,
+	WAMessage,
 	WACallUpdateType,
 	WAMessageKey,
 	WAPatchName
@@ -37,6 +38,7 @@ import {
 	NO_MESSAGE_FOUND_ERROR_TEXT,
 	unixTimestampSeconds,
 	xmppPreKey,
+	toNumber,
 	xmppSignedPreKey
 } from '../Utils'
 import { makeMutex } from '../Utils/make-mutex'
@@ -129,21 +131,26 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		return sendPeerDataOperationMessage(pdoMessage)
 	}
 
-	const requestPlaceholderResend = async (messageKey: WAMessageKey): Promise<string | undefined> => {
+	const requestPlaceholderResend = async (
+		messageKey: WAMessageKey,
+		msgData?: Partial<WAMessage>
+	): Promise<string | undefined> => {
 		if (!authState.creds.me?.id) {
 			throw new Boom('Not authenticated')
 		}
 
-		if (placeholderResendCache.get(messageKey?.id!)) {
+			if (await placeholderResendCache.get(messageKey?.id!)) {
 			logger.debug({ messageKey }, 'already requested resend')
 			return
 		} else {
-			placeholderResendCache.set(messageKey?.id!, true)
+			// Store original message data so PDO response handler can preserve
+			// metadata (LID details, timestamps, etc.) that the phone may omit
+			await placeholderResendCache.set(messageKey?.id!, msgData || true)
 		}
 
-		await delay(5000)
+		await delay(2000)
 
-		if (!placeholderResendCache.get(messageKey?.id!)) {
+		if (!(await placeholderResendCache.get(messageKey?.id!))) {
 			logger.debug({ messageKey }, 'message received while resend requested')
 			return 'RESOLVED'
 		}
@@ -157,12 +164,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			peerDataOperationRequestType: proto.Message.PeerDataOperationRequestType.PLACEHOLDER_MESSAGE_RESEND
 		}
 
-		setTimeout(() => {
-			if (placeholderResendCache.get(messageKey?.id!)) {
-				logger.debug({ messageKey }, 'PDO message without response after 15 seconds. Phone possibly offline')
-				placeholderResendCache.del(messageKey?.id!)
+		setTimeout(async () => {
+			if (await placeholderResendCache.get(messageKey?.id!)) {
+				logger.debug({ messageKey }, 'PDO message without response after 8 seconds. Phone possibly offline')
+				await placeholderResendCache.del(messageKey?.id!)
 			}
-		}, 15_000)
+		}, 8_000)
 
 		return sendPeerDataOperationMessage(pdoMessage)
 	}
@@ -1132,6 +1139,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			}
 		}
 
+		let acked = false
+
 		const {
 			fullMessage: msg,
 			category,
@@ -1183,14 +1192,93 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			)
 		}
 
+
 		try {
 			await Promise.all([
 				processingMutex.mutex(async () => {
 					await decrypt()
 					// message failed to decrypt
-					if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT) {
-						if (msg?.messageStubParameters?.[0] === MISSING_KEYS_ERROR_TEXT) {
-							return sendMessageAck(node, NACK_REASONS.ParsingError)
+					// message failed to decrypt
+				if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT && msg.category !== 'peer') {
+					if (msg?.messageStubParameters?.[0] === MISSING_KEYS_ERROR_TEXT) {
+						acked = true
+						return sendMessageAck(node, NACK_REASONS.ParsingError)
+					}
+
+					if (msg.messageStubParameters?.[0] === NO_MESSAGE_FOUND_ERROR_TEXT) {
+						// Message arrived without encryption (e.g. CTWA ads messages).
+						// Check if this is eligible for placeholder resend (matching WA Web filters).
+						const unavailableNode = getBinaryNodeChild(node, 'unavailable')
+						const unavailableType = unavailableNode?.attrs?.type
+						if (
+							unavailableType === 'bot_unavailable_fanout' ||
+							unavailableType === 'hosted_unavailable_fanout' ||
+							unavailableType === 'view_once_unavailable_fanout'
+						) {
+							logger.debug(
+								{ msgId: msg.key.id, unavailableType },
+								'skipping placeholder resend for excluded unavailable type'
+							)
+							acked = true
+							return sendMessageAck(node)
+						}
+
+						const messageAge = unixTimestampSeconds() - toNumber(msg.messageTimestamp)
+						if (messageAge > PLACEHOLDER_MAX_AGE_SECONDS) {
+							logger.debug({ msgId: msg.key.id, messageAge }, 'skipping placeholder resend for old message')
+							acked = true
+							return sendMessageAck(node)
+						}
+
+						// Request the real content from the phone via placeholder resend PDO.
+						// Upsert the CIPHERTEXT stub as a placeholder (like WA Web's processPlaceholderMsg),
+						// and store the requestId in stubParameters[1] so users can correlate
+						// with the incoming PDO response event.
+						const cleanKey: proto.IMessageKey = {
+							remoteJid: msg.key.remoteJid,
+							fromMe: msg.key.fromMe,
+							id: msg.key.id,
+							participant: msg.key.participant
+						}
+						// Cache the original message metadata so the PDO response handler
+						// can preserve key fields (LID details etc.) that the phone may omit
+						const msgData: Partial<WAMessage> = {
+							key: msg.key,
+							messageTimestamp: msg.messageTimestamp,
+							pushName: msg.pushName,
+							participant: msg.participant,
+							verifiedBizName: msg.verifiedBizName
+						}
+						requestPlaceholderResend(cleanKey, msgData)
+							.then(requestId => {
+								if (requestId && requestId !== 'RESOLVED') {
+									logger.debug({ msgId: msg.key.id, requestId }, 'requested placeholder resend for unavailable message')
+									ev.emit('messages.update', [
+										{
+											key: msg.key,
+											update: { messageStubParameters: [NO_MESSAGE_FOUND_ERROR_TEXT, requestId] }
+										}
+									])
+								}
+							})
+							.catch(err => {
+								logger.warn({ err, msgId: msg.key.id }, 'failed to request placeholder resend for unavailable message')
+							})
+						acked = true
+						await sendMessageAck(node)
+						// Don't return — fall through to upsertMessage so the stub is emitted
+					} else {
+						// Skip retry for expired status messages (>24h old)
+						if (isJidStatusBroadcast(msg.key.remoteJid!)) {
+							const messageAge = unixTimestampSeconds() - toNumber(msg.messageTimestamp)
+							if (messageAge > STATUS_EXPIRY_SECONDS) {
+								logger.debug(
+									{ msgId: msg.key.id, messageAge, remoteJid: msg.key.remoteJid },
+									'skipping retry for expired status message'
+								)
+								acked = true
+								return sendMessageAck(node)
+							}
 						}
 
 						const errorMessage = msg?.messageStubParameters?.[0] || ''
@@ -1199,15 +1287,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 						logger.debug(`[handleMessage] Attempting retry request for failed decryption`)
 
 						// Handle both pre-key and normal retries in single mutex
-						retryMutex.mutex(async () => {
+						await retryMutex.mutex(async () => {
 							try {
 								if (!ws.isOpen) {
 									logger.debug({ node }, 'Connection closed, skipping retry')
-									return
-								}
-
-								if (getBinaryNodeChild(node, 'unavailable')) {
-									logger.debug('Message unavailable, skipping retry')
 									return
 								}
 
@@ -1240,8 +1323,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 									logger.error({ retryErr }, 'Failed to send retry after error handling')
 								}
 							}
+
+							acked = true
+							await sendMessageAck(node, NACK_REASONS.UnhandledError)
 						})
-					} else {
+					}
+				} else {
 						// no type in the receipt => message delivered
 						let type: MessageReceiptType = undefined
 						let participant = msg.key.participant
