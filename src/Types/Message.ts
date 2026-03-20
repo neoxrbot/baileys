@@ -42,6 +42,23 @@ export enum WAMessageAddressingMode {
 	LID = 'lid'
 }
 
+export type Sticker = {
+	data: WAMediaUpload
+	emojis?: string[]
+	accessibilityLabel?: string
+	isAnimated?: boolean
+	isLottie?: boolean
+}
+
+export type StickerPack = {
+	stickers: Sticker[]
+	cover: WAMediaUpload
+	name: string
+	publisher: string
+	description?: string
+	packId?: string
+}
+
 export type MessageWithContextInfo =
 	| 'imageMessage'
 	| 'contactMessage'
@@ -220,6 +237,7 @@ export type AnyRegularMessageContent = (
 			Contextable &
 			Editable)
 	| AnyMediaMessageContent
+	| { stickerPack: StickerPack }
 	| { event: EventMessageOptions }
 	| ({
 			poll: PollMessageOptions
@@ -250,7 +268,7 @@ export type AnyRegularMessageContent = (
 			pin: WAMessageKey
 			type: proto.PinInChat.Type
 			/**
-			 * 24 hours, 7 days, 30 days
+			 * 24 hours, 7 days, 30 days 
 			 */
 			time?: 86400 | 604800 | 2592000
 	  }
