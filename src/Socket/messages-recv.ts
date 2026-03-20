@@ -2,6 +2,9 @@ import NodeCache from '@cacheable/node-cache'
 import { Boom } from '@hapi/boom'
 import { randomBytes } from 'crypto'
 import Long from 'long'
+import { makeOfflineNodeProcessor, type MessageType } from '../Utils/offline-node-processor'
+import { buildAckStanza } from '../Utils/stanza-ack'
+
 import { proto } from '../../WAProto/index.js'
 import { DEFAULT_CACHE_TTLS, KEY_BUNDLE_TYPE, PLACEHOLDER_MAX_AGE_SECONDS, MIN_PREKEY_COUNT, STATUS_EXPIRY_SECONDS } from '../Defaults'
 import type {
@@ -326,40 +329,9 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 	}
 
-	const sendMessageAck = async ({ tag, attrs, content }: BinaryNode, errorCode?: number) => {
-		const stanza: BinaryNode = {
-			tag: 'ack',
-			attrs: {
-				id: attrs.id!,
-				to: attrs.from!,
-				class: tag
-			}
-		}
-
-		if (!!errorCode) {
-			stanza.attrs.error = errorCode.toString()
-		}
-
-		if (!!attrs.participant) {
-			stanza.attrs.participant = attrs.participant
-		}
-
-		if (!!attrs.recipient) {
-			stanza.attrs.recipient = attrs.recipient
-		}
-
-		if (
-			!!attrs.type &&
-			(tag !== 'message' || getBinaryNodeChild({ tag, attrs, content }, 'unavailable') || errorCode !== 0)
-		) {
-			stanza.attrs.type = attrs.type
-		}
-
-		if (tag === 'message' && getBinaryNodeChild({ tag, attrs, content }, 'unavailable')) {
-			stanza.attrs.from = authState.creds.me!.id
-		}
-
-		logger.debug({ recv: { tag, attrs }, sent: stanza.attrs }, 'sent ack')
+	const sendMessageAck = async (node: BinaryNode, errorCode?: number) => {
+		const stanza = buildAckStanza(node, errorCode, authState.creds.me!.id)
+		logger.debug({ recv: { tag: node.tag, attrs: node.attrs }, sent: stanza.attrs }, 'sent ack')
 		await sendNode(stanza)
 	}
 
@@ -1068,7 +1040,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				})
 			])
 		} finally {
-			await sendMessageAck(node)
+			await sendMessageAck(node).catch(ackErr => logger.error({ ackErr }, 'failed to ack receipt'))
 		}
 	}
 
@@ -1102,7 +1074,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				})
 			])
 		} finally {
-			await sendMessageAck(node)
+			await sendMessageAck(node).catch(ackErr => logger.error({ ackErr }, 'failed to ack notification'))
 		}
 	}
 
@@ -1480,56 +1452,20 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 	}
 
-	type MessageType = 'message' | 'call' | 'receipt' | 'notification'
-
-	type OfflineNode = {
-		type: MessageType
-		node: BinaryNode
-	}
-
-	const makeOfflineNodeProcessor = () => {
-		const nodeProcessorMap: Map<MessageType, (node: BinaryNode) => Promise<void>> = new Map([
+	const offlineNodeProcessor = makeOfflineNodeProcessor(
+		new Map<MessageType, (node: BinaryNode) => Promise<void>>([
 			['message', handleMessage],
 			['call', handleCall],
 			['receipt', handleReceipt],
 			['notification', handleNotification]
-		])
-		const nodes: OfflineNode[] = []
-		let isProcessing = false
-
-		const enqueue = (type: MessageType, node: BinaryNode) => {
-			nodes.push({ type, node })
-
-			if (isProcessing) {
-				return
-			}
-
-			isProcessing = true
-
-			const promise = async () => {
-				while (nodes.length && ws.isOpen) {
-					const { type, node } = nodes.shift()!
-
-					const nodeProcessor = nodeProcessorMap.get(type)
-
-					if (!nodeProcessor) {
-						onUnexpectedError(new Error(`unknown offline node type: ${type}`), 'processing offline node')
-						continue
-					}
-
-					await nodeProcessor(node)
-				}
-
-				isProcessing = false
-			}
-
-			promise().catch(error => onUnexpectedError(error, 'processing offline nodes'))
+		]),
+		{
+			isWsOpen: () => ws.isOpen,
+			onUnexpectedError,
+			yieldToEventLoop: () => new Promise(resolve => setImmediate(resolve))
 		}
+	)
 
-		return { enqueue }
-	}
-
-	const offlineNodeProcessor = makeOfflineNodeProcessor()
 
 	const processNode = (
 		type: MessageType,
