@@ -1114,9 +1114,9 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			return 'event'
 		}
 
-		if (getMediaType(message)) {
-			return 'media'
-		}
+		// if (getMediaType(message)) {
+		// 	return 'media'
+		// }
 
 		return 'text'
 	}
