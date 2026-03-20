@@ -63,7 +63,7 @@ export type AuthenticationCreds = SignalCreds & {
 	pairingCode: string | undefined
 	lastPropHash: string | undefined
 	routingInfo: Buffer | undefined
-}
+} 
 
 export type SignalDataTypeMap = {
 	'pre-key': KeyPair
@@ -73,6 +73,9 @@ export type SignalDataTypeMap = {
 	'app-state-sync-key': proto.Message.IAppStateSyncKeyData
 	'app-state-sync-version': LTHashState
 	'lid-mapping': string
+	'device-list': string[]
+	tctoken: { token: Buffer; timestamp?: string }
+	'identity-key': Uint8Array
 }
 
 export type SignalDataSet = { [T in keyof SignalDataTypeMap]?: { [id: string]: SignalDataTypeMap[T] | null } }

@@ -5,7 +5,25 @@ export const PSA_WID = '0@c.us'
 export const STORIES_JID = 'status@broadcast'
 export const META_AI_JID = '13135550002@c.us'
 
-export type JidServer = 'c.us' | 'g.us' | 'broadcast' | 's.whatsapp.net' | 'call' | 'lid' | 'newsletter' | 'bot'
+export type JidServer =
+	| 'c.us'
+	| 'g.us'
+	| 'broadcast'
+	| 's.whatsapp.net'
+	| 'call'
+	| 'lid'
+	| 'newsletter'
+	| 'bot'
+	| 'hosted'
+	| 'hosted.lid'
+
+export enum WAJIDDomains {
+	WHATSAPP = 0,
+	LID = 1,
+	HOSTED = 128,
+	HOSTED_LID = 129
+}
+
 
 export type JidWithDevice = {
 	user: string
