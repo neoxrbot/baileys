@@ -463,7 +463,7 @@ export const generateWAMessageContent = async (
 		}
 	} else if ('stickerPack' in message) {
 		m = await prepareStickerPackMessage(message.stickerPack, options)
-	}  else if ('pin' in message) {
+	} else if ('pin' in message) {
 		m.pinInChatMessage = {}
 		m.messageContextInfo = {}
 
@@ -580,26 +580,13 @@ export const generateWAMessageContent = async (
 		'mentions' in message && message.mentions?.length ||
 		'mentionAll' in message && message.mentionAll
 	) {
-		// const messageType = Object.keys(m)[0]! as Extract<keyof proto.IMessage, MessageWithContextInfo>
-		// const key = m[messageType]
-		// if ('contextInfo' in key! && !!key.contextInfo) {
-		// 	key.contextInfo.mentionedJid = message.mentions
-		// } else if (key!) {
-		// 	key.contextInfo = {
-		// 		mentionedJid: message.mentions
-		// 	}
-
-		// 	if (message.mentionAll) {
-		// 		key.contextInfo.nonJidMentions = 1
-		// 	}
-		// }
-
 		const messageType = Object.keys(m)[0]! as Extract<keyof proto.IMessage, MessageWithContextInfo>
 		const key = m[messageType]
-		if (key && 'contextInfo' in key) {
-			key.contextInfo = key.contextInfo || {}
-			if (message.mentions?.length) {
-				key.contextInfo.mentionedJid = message.mentions
+		if ('contextInfo' in key! && !!key.contextInfo) {
+			key.contextInfo.mentionedJid = message.mentions
+		} else if (key!) {
+			key.contextInfo = {
+				mentionedJid: message.mentions
 			}
 
 			if (message.mentionAll) {
@@ -607,6 +594,20 @@ export const generateWAMessageContent = async (
 				key.contextInfo.nonJidMentions = 1
 			}
 		}
+
+		// const messageType = Object.keys(m)[0]! as Extract<keyof proto.IMessage, MessageWithContextInfo>
+		// const key = m[messageType]
+		// if (key && 'contextInfo' in key) {
+		// 	key.contextInfo = key.contextInfo || {}
+		// 	if (message.mentions?.length) {
+		// 		key.contextInfo.mentionedJid = message.mentions
+		// 	}
+
+		// 	if (message.mentionAll) {
+		// 		// @ts-ignore
+		// 		key.contextInfo.nonJidMentions = 1
+		// 	}
+		// }
 	}
 
 
@@ -1104,46 +1105,51 @@ async function prepareStickerPackMessage(
 	const lib = await getImageProcessingLibrary()
 	const stickerData: Record<string, [Uint8Array, { level: 0 }]> = {}
 	const stickerPromises = stickers.map(async (s, i) => {
-		const { stream } = await getStream(s.data)
-		const buffer = await toBuffer(stream)
+		try {
+			const { stream } = await getStream(s.data)
+			const buffer = await toBuffer(stream)
 
-		let webpBuffer: Buffer
-		let isAnimated = false
-		const isWebP = isWebPBuffer(buffer)
+			let webpBuffer: Buffer
+			let isAnimated = false
+			const isWebP = isWebPBuffer(buffer)
 
-		if (isWebP) {
-			// Already WebP - preserve original to keep exif metadata and animation
-			webpBuffer = buffer
-			isAnimated = isAnimatedWebP(buffer)
-		} else if ('sharp' in lib && lib.sharp) {
-			// Convert to WebP, preserving metadata
-			webpBuffer = await lib.sharp.default(buffer).webp().toBuffer()
-			// Non-WebP inputs converted to WebP are not animated
-			isAnimated = false
-		} else {
-			throw new Boom(
-				'No image processing library (sharp) available for converting sticker to WebP. Either install sharp or provide stickers in WebP format.'
-			)
-		}
+			if (isWebP) {
+				// Already WebP - preserve original to keep exif metadata and animation
+				webpBuffer = buffer
+				isAnimated = isAnimatedWebP(buffer)
+			} else if ('sharp' in lib && lib.sharp) {
+				// Convert to WebP, preserving metadata
+				webpBuffer = await lib.sharp.default(buffer).webp().toBuffer()
+				// Non-WebP inputs converted to WebP are not animated
+				isAnimated = false
+			} else {
+				throw new Boom(
+					'No image processing library (sharp) available for converting sticker to WebP. Either install sharp or provide stickers in WebP format.'
+				)
+			}
 
-		if (webpBuffer.length > 1024 * 1024) {
-			throw new Boom(`Sticker at index ${i} exceeds the 1MB size limit`, { statusCode: 400 })
-		}
+			if (webpBuffer.length > 1024 * 1024) {
+				throw new Boom(`Sticker at index ${i} exceeds the 1MB size limit`, { statusCode: 400 })
+			}
 
-		const hash = sha256(webpBuffer).toString('base64').replace(/\//g, '-')
-		const fileName = `${hash}.webp`
-		stickerData[fileName] = [new Uint8Array(webpBuffer), { level: 0 as 0 }]
-		return {
-			fileName,
-			mimetype: 'image/webp',
-			isAnimated: s.isAnimated || isAnimated,
-			emojis: s.emojis || [],
-			accessibilityLabel: s.accessibilityLabel || '',
-			isLottie: s.isLottie || false
+			const hash = sha256(webpBuffer).toString('base64').replace(/\//g, '-')
+			const fileName = `${hash}.webp`
+			stickerData[fileName] = [new Uint8Array(webpBuffer), { level: 0 as 0 }]
+			return {
+				fileName,
+				mimetype: 'image/webp',
+				isAnimated: s.isAnimated || isAnimated,
+				emojis: s.emojis || [],
+				accessibilityLabel: s.accessibilityLabel || '',
+				isLottie: s.isLottie || false
+			}
+		} catch (e: any) {
+			options.logger?.warn(`Skipping sticker ${i}: ${e.message}`);
+			return null;
 		}
 	})
 
-	const stickerMetadata = await Promise.all(stickerPromises)
+	const stickerMetadata = (await Promise.all(stickerPromises)).filter(Boolean)
 
 	// Process and add cover/tray icon to the ZIP
 	const trayIconFileName = `${stickerPackIdValue}.webp`
@@ -1199,7 +1205,7 @@ async function prepareStickerPackMessage(
 		packDescription: description,
 		stickerPackOrigin: WAProto.Message.StickerPackMessage.StickerPackOrigin.USER_CREATED,
 		stickerPackSize: stickerPackSize,
-		stickers: stickerMetadata,
+		stickers: stickerMetadata as any,
 
 		fileSha256: stickerPackUpload.fileSha256,
 		fileEncSha256: stickerPackUpload.fileEncSha256,
