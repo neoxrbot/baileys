@@ -699,10 +699,32 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				return
 			}
 
-			if (normalizeMessageContent(message)?.pinInChatMessage || normalizeMessageContent(message)?.reactionMessage) {
-				extraAttrs['decrypt-fail'] = 'hide' // todo: expand for reactions and other types
-			}
+			// if (normalizeMessageContent(message)?.pinInChatMessage || normalizeMessageContent(message)?.reactionMessage) {
+			// 	extraAttrs['decrypt-fail'] = 'hide' // todo: expand for reactions and other types
+			// }
 
+			const isNeedMetaAttrs = innerMessage?.pinInChatMessage || innerMessage?.keepInChatMessage || innerMessage?.reactionMessage
+            if (isNeedMetaAttrs) {
+                const metaAttrs: any = {}
+                if (innerMessage?.pollUpdateMessage) {
+                    metaAttrs.polltype = 'vote';
+                }
+                metaAttrs.content_type = 'add_on';
+                binaryNodeContent.push({
+                    tag: 'meta',
+                    attrs: metaAttrs,
+                    content: undefined
+                });
+            }
+			
+            if (isNeedMetaAttrs || innerMessage?.protocolMessage?.editedMessage || innerMessage?.protocolMessage?.mediaNotifyMessage) {
+                extraAttrs['decrypt-fail'] = 'hide'; // todo: expand for reactions and other types
+            }
+
+			if (innerMessage?.interactiveResponseMessage?.nativeFlowResponseMessage) {
+                extraAttrs['native_flow_name'] = innerMessage.interactiveResponseMessage.nativeFlowResponseMessage.name!
+            }
+			
 			if (isGroupOrStatus && !isRetryResend) {
 				const [groupData, senderKeyMap] = await Promise.all([
 					(async () => {
