@@ -25,14 +25,17 @@ import {
 	generateMessageIDV2,
 	generateParticipantHashV2,
 	generateWAMessage,
+	generateWAMessageFromContent,
 	getStatusCodeForMediaRetry,
 	getUrlFromDirectPath,
 	getWAUploadToServer,
 	MessageRetryManager,
 	normalizeMessageContent,
 	parseAndInjectE2ESessions,
-	unixTimestampSeconds
+	unixTimestampSeconds,
+	delay
 } from '../Utils'
+import { randomBytes } from 'node:crypto'
 import { getUrlInfo } from '../Utils/link-preview'
 import { makeKeyedMutex } from '../Utils/make-mutex'
 import { getMessageReportingToken, shouldIncludeReportingToken } from '../Utils/reporting-utils'
@@ -661,7 +664,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		}
 
 		await authState.keys.transaction(async () => {
-			const mediaType = getMediaType(message)
+			const innerMessage = normalizeMessageContent(message)
+			const mediaType = getMediaType(innerMessage!)
 			if (mediaType) {
 				extraAttrs['mediatype'] = mediaType
 			}
@@ -669,11 +673,17 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			if (isNewsletter) {
 				const patched = patchMessageBeforeSending ? await patchMessageBeforeSending(message, []) : message
 				const bytes = encodeNewsletterMessage(patched as proto.IMessage)
+
+				if (additionalNodes && additionalNodes.length > 0) {
+					binaryNodeContent.push(...additionalNodes)
+				}
+
 				binaryNodeContent.push({
 					tag: 'plaintext',
-					attrs: {},
+					attrs: extraAttrs,
 					content: bytes
 				})
+
 				const stanza: BinaryNode = {
 					tag: 'message',
 					attrs: {
@@ -912,11 +922,11 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 
 				const encodedMessageToSend = isMe
 					? encodeWAMessage({
-							deviceSentMessage: {
-								destinationJid,
-								message
-							}
-						})
+						deviceSentMessage: {
+							destinationJid,
+							message
+						}
+					})
 					: encodeWAMessage(message)
 
 				const { type, ciphertext: encryptedContent } = await signalRepository.encryptMessage({
@@ -980,7 +990,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			}
 
 			if (shouldIncludeDeviceIdentity) {
-				;(stanza.content as BinaryNode[]).push({
+				; (stanza.content as BinaryNode[]).push({
 					tag: 'device-identity',
 					attrs: {},
 					content: encodeSignedDeviceIdentity(authState.creds.account!, true)
@@ -1005,7 +1015,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					}
 					const reportingNode = await getMessageReportingToken(encoded, reportingMessage, reportingKey)
 					if (reportingNode) {
-						;(stanza.content as BinaryNode[]).push(reportingNode)
+						; (stanza.content as BinaryNode[]).push(reportingNode)
 						logger.trace({ jid }, 'added reporting token to message')
 					}
 				} catch (error: any) {
@@ -1019,7 +1029,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			const tcTokenBuffer = contactTcTokenData[destinationJid]?.token
 
 			if (tcTokenBuffer) {
-				;(stanza.content as BinaryNode[]).push({
+				; (stanza.content as BinaryNode[]).push({
 					tag: 'tctoken',
 					attrs: {},
 					content: tcTokenBuffer
@@ -1027,7 +1037,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			}
 
 			if (additionalNodes && additionalNodes.length > 0) {
-				;(stanza.content as BinaryNode[]).push(...additionalNodes)
+				; (stanza.content as BinaryNode[]).push(...additionalNodes)
 			}
 
 			logger.debug({ msgId }, `sending message to ${participants.length} devices`)
@@ -1206,93 +1216,188 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		},
 		sendMessage: async (jid: string, content: AnyMessageContent, options: MiscMessageGenerationOptions = {}) => {
 			const userJid = authState.creds.me!.id
-			if (
-				typeof content === 'object' &&
-				'disappearingMessagesInChat' in content &&
-				typeof content['disappearingMessagesInChat'] !== 'undefined' &&
-				isJidGroup(jid)
-			) {
-				const { disappearingMessagesInChat } = content
-				const value =
-					typeof disappearingMessagesInChat === 'boolean'
-						? disappearingMessagesInChat
-							? WA_DEFAULT_EPHEMERAL
-							: 0
-						: disappearingMessagesInChat
-				await groupToggleEphemeral(jid, value)
-			} else {
-				const fullMsg = await generateWAMessage(jid, content, {
+			if (Array.isArray(jid)) {
+				const { delayMs = 1500 } = options as any
+				const allUsers = new Set();
+				const fullMsg = await generateWAMessage('status@broadcast', content, {
 					logger,
 					userJid,
-					getUrlInfo: text =>
-						getUrlInfo(text, {
-							thumbnailWidth: linkPreviewImageThumbnailWidth,
-							fetchOpts: {
-								timeout: 3_000,
-								...(httpRequestOptions || {})
-							},
-							logger,
-							uploadImage: generateHighQualityLinkPreview ? waUploadToServer : undefined
-						}),
-					//TODO: CACHE
-					getProfilePicUrl: sock.profilePictureUrl,
-					getCallLink: sock.createCallLink,
 					upload: waUploadToServer,
 					mediaCache: config.mediaCache,
 					options: config.options,
-					messageId: generateMessageIDV2(sock.user?.id),
-					...options
-				})
-				const isEventMsg = 'event' in content && !!content.event
-				const isDeleteMsg = 'delete' in content && !!content.delete
-				const isEditMsg = 'edit' in content && !!content.edit
-				const isPinMsg = 'pin' in content && !!content.pin
-				const isPollMessage = 'poll' in content && !!content.poll
-				const additionalAttributes: BinaryNodeAttributes = {}
-				const additionalNodes: BinaryNode[] = []
-				// required for delete
-				if (isDeleteMsg) {
-					// if the chat is a group, and I am not the author, then delete the message as an admin
-					if (isJidGroup(content.delete?.remoteJid as string) && !content.delete?.fromMe) {
-						additionalAttributes.edit = '8'
-					} else {
-						additionalAttributes.edit = '7'
+					...options,
+					messageId: generateMessageIDV2(userJid)
+				});
+				for (const id of jid) {
+					if (isJidGroup(id)) {
+						try {
+							const groupData = (cachedGroupMetadata ? await cachedGroupMetadata(id) : null) || await groupMetadata(id);
+							for (const participant of groupData.participants) {
+								if (allUsers.has(participant.id))
+									continue;
+								allUsers.add(participant.id);
+							}
+						}
+						catch (error) {
+							logger.error(`Error getting metadata group from ${id}: ${error}`);
+						}
 					}
-				} else if (isEditMsg) {
-					additionalAttributes.edit = '1'
-				} else if (isPinMsg) {
-					additionalAttributes.edit = '2'
-				} else if (isPollMessage) {
-					additionalNodes.push({
-						tag: 'meta',
-						attrs: {
-							polltype: 'creation'
-						}
-					} as BinaryNode)
-				} else if (isEventMsg) {
-					additionalNodes.push({
-						tag: 'meta',
-						attrs: {
-							event_type: 'creation'
-						}
-					} as BinaryNode)
+					else if (!allUsers.has(id)) {
+						allUsers.add(id);
+					}
 				}
-
-				await relayMessage(jid, fullMsg.message!, {
+				await relayMessage('status@broadcast', fullMsg.message!, {
 					messageId: fullMsg.key.id!,
-					useCachedGroupMetadata: options.useCachedGroupMetadata,
-					additionalAttributes,
-					statusJidList: options.statusJidList,
-					additionalNodes
-				})
+					statusJidList: Array.from(allUsers) as any,
+					additionalNodes: [
+						{
+							tag: 'meta',
+							attrs: {},
+							content: [
+								{
+									tag: 'mentioned_users',
+									attrs: {},
+									content: jid.map(id => ({
+										tag: 'to',
+										attrs: { jid: id },
+										content: undefined
+									}))
+								}
+							]
+						}
+					]
+				});
 				if (config.emitOwnEvents) {
 					process.nextTick(async () => {
-						await messageMutex.mutex(() => upsertMessage(fullMsg, 'append'))
-					})
+						await messageMutex.mutex(() => upsertMessage(fullMsg, 'append'));
+					});
 				}
-
-				return fullMsg
+				for (const id of jid) {
+					const isGroup = isJidGroup(id)
+					const sendType = isGroup ? 'groupStatusMentionMessage' : 'statusMentionMessage';
+					const mentionMsg = generateWAMessageFromContent(id, {
+						messageContextInfo: {
+							messageSecret: randomBytes(32)
+						},
+						[sendType]: {
+							message: {
+								protocolMessage: {
+									key: fullMsg.key,
+									type: 25
+								}
+							}
+						}
+					}, {
+						userJid
+					});
+					await relayMessage(id, mentionMsg.message!, {
+						additionalNodes: [
+							{
+								tag: 'meta',
+								attrs: isGroup ?
+									{ is_group_status_mention: 'true' } :
+									{ is_status_mention: 'true' },
+								content: undefined
+							}
+						]
+					});
+					if (config.emitOwnEvents) {
+						process.nextTick(async () => {
+							await messageMutex.mutex(() => upsertMessage(mentionMsg, 'append'));
+						});
+					}
+					await delay(delayMs);
+				}
+				return fullMsg;
 			}
+			else
+				if (
+					typeof content === 'object' &&
+					'disappearingMessagesInChat' in content &&
+					typeof content['disappearingMessagesInChat'] !== 'undefined' &&
+					isJidGroup(jid)
+				) {
+					const { disappearingMessagesInChat } = content
+					const value =
+						typeof disappearingMessagesInChat === 'boolean'
+							? disappearingMessagesInChat
+								? WA_DEFAULT_EPHEMERAL
+								: 0
+							: disappearingMessagesInChat
+					await groupToggleEphemeral(jid, value)
+				} else {
+					const fullMsg = await generateWAMessage(jid, content, {
+						logger,
+						userJid,
+						getUrlInfo: text =>
+							getUrlInfo(text, {
+								thumbnailWidth: linkPreviewImageThumbnailWidth,
+								fetchOpts: {
+									timeout: 3_000,
+									...(httpRequestOptions || {})
+								},
+								logger,
+								uploadImage: generateHighQualityLinkPreview ? waUploadToServer : undefined
+							}),
+						//TODO: CACHE
+						getProfilePicUrl: sock.profilePictureUrl,
+						getCallLink: sock.createCallLink,
+						upload: waUploadToServer,
+						mediaCache: config.mediaCache,
+						options: config.options,
+						messageId: generateMessageIDV2(sock.user?.id),
+						...options
+					})
+					const isEventMsg = 'event' in content && !!content.event
+					const isDeleteMsg = 'delete' in content && !!content.delete
+					const isEditMsg = 'edit' in content && !!content.edit
+					const isPinMsg = 'pin' in content && !!content.pin
+					const isPollMessage = 'poll' in content && !!content.poll
+					const additionalAttributes: BinaryNodeAttributes = {}
+					const additionalNodes: BinaryNode[] = []
+					// required for delete
+					if (isDeleteMsg) {
+						// if the chat is a group, and I am not the author, then delete the message as an admin
+						if (isJidGroup(content.delete?.remoteJid as string) && !content.delete?.fromMe) {
+							additionalAttributes.edit = '8'
+						} else {
+							additionalAttributes.edit = '7'
+						}
+					} else if (isEditMsg) {
+						additionalAttributes.edit = '1'
+					} else if (isPinMsg) {
+						additionalAttributes.edit = '2'
+					} else if (isPollMessage) {
+						additionalNodes.push({
+							tag: 'meta',
+							attrs: {
+								polltype: 'creation'
+							}
+						} as BinaryNode)
+					} else if (isEventMsg) {
+						additionalNodes.push({
+							tag: 'meta',
+							attrs: {
+								event_type: 'creation'
+							}
+						} as BinaryNode)
+					}
+
+					await relayMessage(jid, fullMsg.message!, {
+						messageId: fullMsg.key.id!,
+						useCachedGroupMetadata: options.useCachedGroupMetadata,
+						additionalAttributes,
+						statusJidList: options.statusJidList,
+						additionalNodes
+					})
+					if (config.emitOwnEvents) {
+						process.nextTick(async () => {
+							await messageMutex.mutex(() => upsertMessage(fullMsg, 'append'))
+						})
+					}
+
+					return fullMsg
+				}
 		}
 	}
 }
