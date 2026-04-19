@@ -158,6 +158,72 @@ type EventContext = {
 	responderJid: string
 }
 
+export function decryptPollVoteWithLidFallback(
+	encryptedVote: proto.Message.IPollEncValue,
+	opts: {
+		pollEncKey: Uint8Array
+		pollCreationMsgKey: WAMessageKey
+		voteMsgKey: WAMessageKey
+		meId: string
+		meLid?: string
+	}
+): proto.Message.PollVoteMessage | undefined {
+	const { pollEncKey, pollCreationMsgKey, voteMsgKey, meId, meLid } = opts
+
+	const meIdNormalised = jidNormalizedUser(meId)
+	const meLidNormalised = meLid ? jidNormalizedUser(meLid) : undefined
+
+	// Build JID candidates for poll creator (both PN and LID formats)
+	const creatorPnJid = getKeyAuthor(pollCreationMsgKey, meIdNormalised)
+	const creatorLidJid = pollCreationMsgKey.fromMe && meLidNormalised
+		? meLidNormalised
+		: (pollCreationMsgKey.participant && isLidUser(pollCreationMsgKey.participant)
+			? jidNormalizedUser(pollCreationMsgKey.participant)
+			: ((pollCreationMsgKey as any).participantAlt && isLidUser((pollCreationMsgKey as any).participantAlt)
+				? jidNormalizedUser((pollCreationMsgKey as any).participantAlt)
+				: undefined))
+	const creatorCandidates = [creatorPnJid]
+	if (creatorLidJid && creatorLidJid !== creatorPnJid) {
+		creatorCandidates.push(creatorLidJid)
+	}
+
+	// Build JID candidates for voter (both PN and LID formats)
+	const voterPnJid = getKeyAuthor(voteMsgKey, meIdNormalised)
+	const voterLidJid = voteMsgKey.fromMe && meLidNormalised
+		? meLidNormalised
+		: (voteMsgKey.participant && isLidUser(voteMsgKey.participant)
+			? jidNormalizedUser(voteMsgKey.participant)
+			: ((voteMsgKey as any).participantAlt && isLidUser((voteMsgKey as any).participantAlt)
+				? jidNormalizedUser((voteMsgKey as any).participantAlt)
+				: undefined))
+	const voterCandidates = [voterPnJid]
+	if (voterLidJid && voterLidJid !== voterPnJid) {
+		voterCandidates.push(voterLidJid)
+	}
+
+	// Try all combinations of creator and voter JIDs until decryption succeeds
+	for (const pollCreatorJid of creatorCandidates) {
+		for (const voterJid of voterCandidates) {
+			try {
+				return decryptPollVote(
+					encryptedVote,
+					{
+						pollEncKey,
+						pollCreatorJid,
+						pollMsgId: pollCreationMsgKey.id!,
+						voterJid,
+					}
+				)
+			} catch(err) {
+				// Try next combination
+			}
+		}
+	}
+
+	// All combinations failed
+	return undefined
+}
+
 /**
  * Decrypt a poll vote
  * @param vote encrypted vote
