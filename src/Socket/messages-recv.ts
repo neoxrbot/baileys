@@ -605,6 +605,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 		const actingParticipantLid = fullNode.attrs.participant
 		const actingParticipantPn = fullNode.attrs.participant_pn
+		const actingParticipantUsername = fullNode.attrs.participant_username
 
 		const affectedParticipantLid = getBinaryNodeChild(child, 'participant')?.attrs?.jid || actingParticipantLid!
 		const affectedParticipantPn = getBinaryNodeChild(child, 'participant')?.attrs?.phone_number || actingParticipantPn!
@@ -628,7 +629,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 					{
 						...metadata,
 						author: actingParticipantLid,
-						authorPn: actingParticipantPn
+						authorPn: actingParticipantPn,
+						authorUsername: actingParticipantUsername
 					}
 				])
 				break
@@ -660,6 +662,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 						id: attrs.jid!,
 						phoneNumber: isLidUser(attrs.jid) && isPnUser(attrs.phone_number) ? attrs.phone_number : undefined,
 						lid: isPnUser(attrs.jid) && isLidUser(attrs.lid) ? attrs.lid : undefined,
+						username: attrs.participant_username || attrs.username || undefined,
 						admin: (attrs.type || null) as GroupParticipant['admin']
 					}
 				})
@@ -1220,6 +1223,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 							fromMe,
 							participant: node.attrs.participant,
 							participantAlt,
+							participantUsername: node.attrs.participant_username,
 							addressingMode,
 							id: node.attrs.id,
 							...(msg.key || {})

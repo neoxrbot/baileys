@@ -504,10 +504,10 @@ export const decodePatches = async (
 				getAppStateSyncKey,
 				shouldMutate
 					? mutation => {
-							const index = mutation.syncAction.index?.toString()
-							mutationMap[index!] = mutation
-						}
-					: () => {},
+						const index = mutation.syncAction.index?.toString()
+						mutationMap[index!] = mutation
+					}
+					: () => { },
 				validateMacs
 			)
 		} catch (err) {
@@ -988,6 +988,7 @@ export const processSyncAction = (
 					action.lidContactAction.firstName ||
 					action.lidContactAction.username ||
 					undefined,
+				username: action.lidContactAction.username || undefined,
 				lid: id!,
 				phoneNumber: undefined
 			}
