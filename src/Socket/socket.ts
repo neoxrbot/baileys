@@ -701,7 +701,7 @@ export const makeSocket = (config: SocketConfig) => {
 		 * This clears connection.update listeners AND any process/handler
 		 * listeners registered via ev.on() throughout the socket layers.
 		 */
-		ev.removeAllListeners()
+		ev.removeAllListeners('connection.update')
 	}
 
 	const waitForSocketOpen = async () => {

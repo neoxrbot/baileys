@@ -109,6 +109,7 @@ export class LIDMappingStore {
 		return (await this.getLIDsForPNs([pn]))?.[0]?.lid || null
 	}
 
+
 	async getLIDsForPNs(pns: string[]): Promise<LIDMapping[] | null> {
 		if (pns.length === 0) return null
 
@@ -145,9 +146,8 @@ export class LIDMappingStore {
 
 			// Push the PN device ID to the LID to maintain device separation
 			const pnDevice = decoded!.device !== undefined ? decoded!.device : 0
-			const deviceSpecificLid = `${normalizedLidUser}${!!pnDevice ? `:${pnDevice}` : ``}@${
-				decoded!.server === 'hosted' ? 'hosted.lid' : 'lid'
-			}`
+			const deviceSpecificLid = `${normalizedLidUser}${!!pnDevice ? `:${pnDevice}` : ``}@${decoded!.server === 'hosted' ? 'hosted.lid' : 'lid'
+				}`
 
 			this.logger.trace(`getLIDForPN: ${pn} → ${deviceSpecificLid} (user mapping with device ${pnDevice})`)
 			successfulPairs[pn] = { lid: deviceSpecificLid, pn }
@@ -276,9 +276,8 @@ export class LIDMappingStore {
 			}
 
 			const lidDevice = decoded!.device !== undefined ? decoded!.device : 0
-			const pnJid = `${pnUser}:${lidDevice}@${
-				decoded!.domainType === WAJIDDomains.HOSTED_LID ? 'hosted' : 's.whatsapp.net'
-			}`
+			const pnJid = `${pnUser}:${lidDevice}@${decoded!.domainType === WAJIDDomains.HOSTED_LID ? 'hosted' : 's.whatsapp.net'
+				}`
 
 			this.logger.trace(`Found reverse mapping: ${lid} → ${pnJid}`)
 			successfulPairs[lid] = { lid, pn: pnJid }

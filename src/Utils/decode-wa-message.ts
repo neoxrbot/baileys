@@ -75,6 +75,13 @@ export const NACK_REASONS = {
 	DBOperationFailed: 552
 }
 
+export const SERVER_ERROR_CODES = {
+	/** 1:1 message missing privacy token (tctoken) */
+	MissingTcToken: '463',
+	/** Stanza validation failure (SMAX_INVALID) — likely stale device session */
+	SmaxInvalid: '479'
+} as const
+
 type MessageType =
 	| 'chat'
 	| 'peer_broadcast'
