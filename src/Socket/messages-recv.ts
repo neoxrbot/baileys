@@ -1207,7 +1207,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 	const handleNotification = async (node: BinaryNode) => {
 		const remoteJid = node.attrs.from
-		
+
 		try {
 			await Promise.all([
 				notificationMutex.mutex(async () => {
@@ -1474,6 +1474,14 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			date: new Date(+attrs.t! * 1000),
 			offline: !!attrs.offline,
 			status
+		}
+
+		if (status === 'relaylatency') {
+			const latencyValue = infoChild.attrs.latency || infoChild.attrs['latency_ms'] || infoChild.attrs['latency-ms']
+			const latencyMs = latencyValue ? Number(latencyValue) : undefined
+			if (Number.isFinite(latencyMs)) {
+				call.latencyMs = latencyMs
+			}
 		}
 
 		if (status === 'offer') {
