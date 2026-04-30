@@ -464,6 +464,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		})
 	}
 
+
 	const getBusinessProfile = async (jid: string): Promise<WABusinessProfile | void> => {
 		const results = await query({
 			tag: 'iq',
