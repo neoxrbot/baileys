@@ -105,6 +105,10 @@ export async function getMediaKeys(
 		buffer = Buffer.from(buffer.replace('data:;base64,', ''), 'base64')
 	}
 
+	if (typeof buffer === 'object') {
+		buffer = Buffer.from(Object.values(buffer))
+	}
+
 	// expand using HKDF to 112 bytes, also pass in the relevant app info
 	const expandedMediaKey = hkdf(buffer, 112, { info: hkdfInfoKey(mediaType) })
 	return {
