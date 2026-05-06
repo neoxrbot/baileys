@@ -17,6 +17,7 @@ import { Curve, signedKeyPair } from './crypto'
 import { delay, generateRegistrationId } from './generics'
 import type { ILogger } from './logger'
 import { PreKeyManager } from './pre-key-manager'
+import { Boom } from '@hapi/boom'
 
 /**
  * Transaction context stored in AsyncLocalStorage
@@ -341,6 +342,19 @@ export const addTransactionCapability = (
 			}
 		}
 	}
+}
+
+/**
+ * Returns the authenticated user's JID, or throws a Boom-401 if creds are not yet authenticated.
+ * Use this anywhere we'd otherwise reach for `creds.me!.id` to fail fast with a descriptive error.
+ */
+export const assertMeId = (creds: AuthenticationCreds): string => {
+	const id = creds.me?.id
+	if (!id) {
+		throw new Boom('Cannot proceed: socket is not authenticated yet (creds.me.id is missing)', { statusCode: 401 })
+	}
+
+	return id
 }
 
 export const initAuthCreds = (): AuthenticationCreds => {

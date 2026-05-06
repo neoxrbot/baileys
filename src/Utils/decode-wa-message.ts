@@ -51,6 +51,7 @@ const storeMappingFromEnvelope = async (
 
 export const NO_MESSAGE_FOUND_ERROR_TEXT = 'Message absent from node'
 export const MISSING_KEYS_ERROR_TEXT = 'Key used already or never filled'
+export const ACCOUNT_RESTRICTED_TEXT = 'Your account has been restricted'
 
 // Retry configuration for failed decryption
 export const DECRYPTION_RETRY_CONFIG = {
@@ -59,7 +60,9 @@ export const DECRYPTION_RETRY_CONFIG = {
 	sessionRecordErrors: ['No session record', 'SessionError: No session record']
 }
 
+/** NACK reason codes we send to the server (client → server) */
 export const NACK_REASONS = {
+	SenderReachoutTimelocked: 463,
 	ParsingError: 487,
 	UnrecognizedStanza: 488,
 	UnrecognizedStanzaClass: 489,
@@ -75,6 +78,11 @@ export const NACK_REASONS = {
 	DBOperationFailed: 552
 }
 
+/**
+ * Server-side error codes returned in ack stanzas (server → client) that we
+ * currently have dedicated handlers for. Extend as more handlers are added.
+ * Distinct from the client-side NackReason enum (WAWebCreateNackFromStanza).
+ */
 export const SERVER_ERROR_CODES = {
 	/** 1:1 message missing privacy token (tctoken) */
 	MissingTcToken: '463',
@@ -137,6 +145,14 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 	const participant: string | undefined = stanza.attrs.participant
 	const recipient: string | undefined = stanza.attrs.recipient
 
+	if (!msgId) {
+		throw new Boom('Invalid message stanza: missing id attribute', { data: stanza })
+	}
+
+	if (!from) {
+		throw new Boom('Invalid message stanza: missing from attribute', { data: stanza })
+	}
+
 	const addressingContext = extractAddressingContext(stanza)
 
 	const isMe = (jid: string) => areJidsSameUser(jid, meId)
@@ -144,21 +160,21 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 
 	if (isPnUser(from) || isLidUser(from) || isHostedLidUser(from) || isHostedPnUser(from)) {
 		if (recipient && !isJidMetaAI(recipient)) {
-			if (!isMe(from!) && !isMeLid(from!)) {
+			if (!isMe(from) && !isMeLid(from)) {
 				throw new Boom('receipient present, but msg not from me', { data: stanza })
 			}
 
-			if (isMe(from!) || isMeLid(from!)) {
+			if (isMe(from) || isMeLid(from)) {
 				fromMe = true
 			}
 
 			chatId = recipient
 		} else {
-			chatId = from!
+			chatId = from
 		}
 
 		msgType = 'chat'
-		author = from!
+		author = from
 	} else if (isJidGroup(from)) {
 		if (!participant) {
 			throw new Boom('No participant in group message')
@@ -170,28 +186,28 @@ export function decodeMessageNode(stanza: BinaryNode, meId: string, meLid: strin
 
 		msgType = 'group'
 		author = participant
-		chatId = from!
+		chatId = from
 	} else if (isJidBroadcast(from)) {
 		if (!participant) {
 			throw new Boom('No participant in group message')
 		}
 
 		const isParticipantMe = isMe(participant)
-		if (isJidStatusBroadcast(from!)) {
+		if (isJidStatusBroadcast(from)) {
 			msgType = isParticipantMe ? 'direct_peer_status' : 'other_status'
 		} else {
 			msgType = isParticipantMe ? 'peer_broadcast' : 'other_broadcast'
 		}
 
 		fromMe = isParticipantMe
-		chatId = from!
+		chatId = from
 		author = participant
 	} else if (isJidNewsletter(from)) {
 		msgType = 'newsletter'
-		chatId = from!
-		author = from!
+		chatId = from
+		author = from
 
-		if (isMe(from!) || isMeLid(from!)) {
+		if (isMe(from) || isMeLid(from)) {
 			fromMe = true
 		}
 	} else {
