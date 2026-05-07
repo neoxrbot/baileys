@@ -1782,11 +1782,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const isReachoutTimelocked = attrs.error === String(NACK_REASONS.SenderReachoutTimelocked)
 
 		if (attrs.error) {
-			if (attrs.error === SERVER_ERROR_CODES.MissingTcToken) {
-				// 463 = account restricted + no tctoken for this contact.
-				// WA Web prevents this client-side (disables compose bar).
-				// No retry — retrying worsens the restriction by counting
-				// as another "reach out" to an unknown contact.
+			if (attrs.error === SERVER_ERROR_CODES.MessageAccountRestriction) {
+				// 463 = 1:1 message missing privacy token (tctoken). Usually means the
+				// account is restricted: WhatsApp blocks starting new chats but preserves
+				// existing ones, since established chats already carry a tctoken.
+				// WA Web prevents this client-side (disables the compose bar).
+				// No retry — retrying counts as another "reach out" and worsens the restriction.
 				logger.warn(
 					{ msgId: attrs.id, from: attrs.from },
 					'error 463: account restricted or missing tctoken for contact'
