@@ -18,6 +18,7 @@ import {
 	assertMeId,
 	bindWaitForEvent,
 	decryptMediaRetryData,
+	DEF_MEDIA_HOST,
 	encodeNewsletterMessage,
 	encodeSignedDeviceIdentity,
 	encodeWAMessage,
@@ -115,11 +116,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			useClones: false
 		})
 
-	const peerSessionsCache = new NodeCache<boolean>({
-		stdTTL: DEFAULT_CACHE_TTLS.USER_DEVICES,
-		useClones: false
-	})
-
 	// Initialize message retry manager if enabled
 	const messageRetryManager = enableRecentMessageCache ? new MessageRetryManager(logger, maxMsgRetryCount) : null
 
@@ -127,6 +123,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 	const encryptionMutex = makeKeyedMutex()
 
 	let mediaConn: Promise<MediaConnInfo> | undefined
+	/** Per-socket media host; updated whenever media_conn is fetched. Defaults to the public WhatsApp host. */
+	let mediaHost: string = DEF_MEDIA_HOST
 	const refreshMediaConn = async (forceGet = false): Promise<MediaConnInfo> => {
 		const media = await mediaConn
 		if (!media || forceGet || new Date().getTime() - media.fetchDate.getTime() > media.ttl * 1000) {
@@ -152,6 +150,9 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					fetchDate: new Date()
 				}
 				logger.debug('fetched media conn')
+				if (node.hosts[0]) {
+					mediaHost = node.hosts[0].hostname
+				}
 				return node
 			})()
 		}
@@ -442,24 +443,15 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 
 	const assertSessions = async (jids: string[], force?: boolean) => {
 		let didFetchNewSession = false
-		const uniqueJids = [...new Set(jids)] // Deduplicate JIDs
+		const uniqueJids = [...new Set(jids)]
 		const jidsRequiringFetch: string[] = []
 
 		logger.debug({ jids }, 'assertSessions call with jids')
 
-		// Check peerSessionsCache and validate sessions using libsignal loadSession
 		for (const jid of uniqueJids) {
-			const signalId = signalRepository.jidToSignalProtocolAddress(jid)
-			const cachedSession = peerSessionsCache.get(signalId)
-			if (cachedSession !== undefined) {
-				if (cachedSession && !force) {
-					continue // Session exists in cache
-				}
-			} else {
+			if (!force) {
 				const sessionValidation = await signalRepository.validateSession(jid)
-				const hasSession = sessionValidation.exists
-				peerSessionsCache.set(signalId, hasSession)
-				if (hasSession && !force) {
+				if (sessionValidation.exists) {
 					continue
 				}
 			}
@@ -500,12 +492,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			})
 			await parseAndInjectE2ESessions(result, signalRepository)
 			didFetchNewSession = true
-
-			// Cache fetched sessions using wire JIDs
-			for (const wireJid of wireJids) {
-				const signalId = signalRepository.jidToSignalProtocolAddress(wireJid)
-				peerSessionsCache.set(signalId, true)
-			}
 		}
 
 		return didFetchNewSession
@@ -1324,10 +1310,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			userDevicesCache.close()
 		}
 
-		if (peerSessionsCache.close) {
-			peerSessionsCache.close()
-		}
-
 		mediaConn = undefined
 		if (messageRetryManager) {
 			messageRetryManager.clear()
@@ -1344,6 +1326,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		sendReceipts,
 		readMessages,
 		refreshMediaConn,
+		// Function (not getter) so the spread in chats.ts preserves the live closure binding.
+		getMediaHost: () => mediaHost,
 		waUploadToServer,
 		fetchPrivacySettings,
 		sendPeerDataOperationMessage,
@@ -1377,7 +1361,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 								}
 
 								content.directPath = media.directPath
-								content.url = getUrlFromDirectPath(content.directPath!)
+								content.url = getUrlFromDirectPath(content.directPath!, mediaHost)
 
 								logger.debug({ directPath: media.directPath, key: result.key }, 'media update successful')
 							} catch (err: any) {
