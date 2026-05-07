@@ -16,12 +16,13 @@ import type {
 	MessageRelayOptions,
 	MessageUserReceipt,
 	SocketConfig,
+	NewChatMessageCapInfo,
 	WACallEvent,
 	WAMessage,
 	WAMessageKey,
 	WAPatchName
 } from '../Types'
-import { WAMessageStatus, WAMessageStubType } from '../Types'
+import { ReachoutTimelockEnforcementType, WAMessageStatus, WAMessageStubType } from '../Types'
 import {
 	ACCOUNT_RESTRICTED_TEXT,
 	aesDecryptCTR,
@@ -83,6 +84,25 @@ import {
 	storeTcTokensFromIqResult,
 	TC_TOKEN_INDEX_KEY
 } from '../Utils/tc-token-utils'
+
+type MexGqlData = Record<string, unknown>
+
+type MexGqlResponse = {
+	data?: MexGqlData
+	errors?: unknown[]
+}
+
+type ReachoutTimelockNotificationPayload = {
+	is_active?: boolean
+	enforcement_type?: string
+	time_enforcement_ends?: string
+}
+
+const ENFORCEMENT_TYPE_VALUES = new Set<string>(Object.values(ReachoutTimelockEnforcementType))
+
+function isValidEnforcementType(value: string | undefined): value is ReachoutTimelockEnforcementType {
+	return typeof value === 'string' && ENFORCEMENT_TYPE_VALUES.has(value)
+}
 
 export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	const { logger, retryRequestDelayMs, maxMsgRetryCount, getMessage, shouldIgnoreJid, enableAutoSessionRecreation } =
@@ -207,14 +227,137 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		return sendPeerDataOperationMessage(pdoMessage)
 	}
 
+	const handleMexNotification = async (node: BinaryNode) => {
+		const updateNode = getBinaryNodeChild(node, 'update')
+
+		if (updateNode) {
+			const opName = updateNode.attrs?.op_name
+			if (!opName) {
+				logger.warn({ node: binaryNodeToString(node) }, 'mex notification missing op_name, fallback to legacy')
+				await handleLegacyMexNewsletterNotification(node)
+				return
+			}
+
+			let mexResponse: MexGqlResponse
+			try {
+				mexResponse = JSON.parse(updateNode.content!.toString())
+			} catch (error) {
+				logger.error({ err: error, opName }, 'failed to parse mex notification JSON')
+				return
+			}
+
+			if (mexResponse.errors?.length) {
+				logger.warn({ errors: mexResponse.errors, opName }, 'mex notification has GQL errors')
+				return
+			}
+
+			const data = mexResponse.data
+			if (!data) {
+				logger.warn({ opName }, 'mex notification has null data')
+				return
+			}
+
+			logger.debug({ opName }, 'processing mex notification')
+
+			switch (opName) {
+				case 'NotificationUserReachoutTimelockUpdate':
+					handleReachoutTimelockNotification(data)
+					break
+
+				case 'MessageCappingInfoNotification':
+					handleMessageCappingNotification(data)
+					break
+
+				// newsletter ops still use the legacy <mex> child structure
+				case 'NotificationNewsletterUpdate':
+				case 'NotificationLinkedProfilesUpdates':
+				case 'NotificationNewsletterAdminPromote':
+				case 'NotificationNewsletterAdminDemote':
+				case 'NotificationNewsletterUserSettingChange':
+				case 'NotificationNewsletterJoin':
+				case 'NotificationNewsletterLeave':
+				case 'NotificationNewsletterStateChange':
+				case 'NotificationNewsletterAdminMetadataUpdate':
+				case 'NotificationNewsletterOwnerUpdate':
+				case 'NotificationNewsletterAdminInviteRevoke':
+				case 'NotificationNewsletterWamoSubStatusChange':
+				case 'NotificationNewsletterBlockUser':
+				case 'NotificationNewsletterPaidPartnership':
+				case 'NotificationNewsletterMilestone':
+				case 'NewsletterResponseStateUpdate':
+					await handleLegacyMexNewsletterNotification(node)
+					break
+
+				default:
+					logger.debug({ opName }, 'unhandled mex notification')
+					break
+			}
+
+			return
+		}
+
+		await handleLegacyMexNewsletterNotification(node)
+	}
+
+	const handleReachoutTimelockNotification = (data: MexGqlData) => {
+		const payload = data.xwa2_notify_account_reachout_timelock as ReachoutTimelockNotificationPayload | undefined
+
+		if (!payload) {
+			logger.warn('reachout timelock notification missing payload')
+			return
+		}
+
+		if (!payload.is_active) {
+			logger.info('reachout timelock restriction lifted')
+			ev.emit('connection.update', {
+				reachoutTimeLock: {
+					isActive: false,
+					enforcementType: ReachoutTimelockEnforcementType.DEFAULT
+				}
+			})
+			return
+		}
+
+		// WA Web defaults to now+60s when the server omits the expiry
+		const timeEnforcementEnds = payload.time_enforcement_ends
+			? new Date(parseInt(payload.time_enforcement_ends, 10) * 1000)
+			: new Date(Date.now() + 60_000)
+
+		const enforcementType = isValidEnforcementType(payload.enforcement_type)
+			? payload.enforcement_type
+			: ReachoutTimelockEnforcementType.DEFAULT
+
+		logger.info({ enforcementType, timeEnforcementEnds }, 'reachout timelock restriction set')
+
+		ev.emit('connection.update', {
+			reachoutTimeLock: {
+				isActive: true,
+				timeEnforcementEnds,
+				enforcementType
+			}
+		})
+	}
+
+	const handleMessageCappingNotification = (data: MexGqlData) => {
+		const payload = data.xwa2_notify_new_chat_messages_capping_info_update as NewChatMessageCapInfo | undefined
+
+		if (!payload) {
+			logger.warn('message capping notification missing payload')
+			return
+		}
+
+		logger.info({ payload }, 'received message capping update')
+		ev.emit('message-capping.update', payload)
+	}
+
 	// Handles mex newsletter notifications
 	// Handles mex newsletter notifications
-	const handleMexNewsletterNotification = async (node: BinaryNode) => {
+	const handleLegacyMexNewsletterNotification = async (node: BinaryNode) => {
 		const mexNode = getBinaryNodeChild(node, 'mex')
 		const updateNode = mexNode?.content ? null : getBinaryNodeChild(node, 'update') || getAllBinaryNodeChildren(node)[0]
 		const payloadNode = mexNode?.content ? mexNode : updateNode
 		if (!payloadNode?.content) {
-			logger.warn({ node }, 'Invalid mex newsletter notification')
+			logger.warn({ node: binaryNodeToString(node) }, 'invalid mex newsletter notification')
 			return
 		}
 
@@ -222,7 +365,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		try {
 			const payloadContent = payloadNode.content
 			if (Array.isArray(payloadContent)) {
-				logger.warn({ payloadNode }, 'Invalid mex newsletter notification payload format')
+				logger.warn({ payloadNode }, 'invalid mex newsletter notification payload format')
 				return
 			}
 
@@ -230,7 +373,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				typeof payloadContent === 'string' ? Buffer.from(payloadContent, 'binary') : Buffer.from(payloadContent)
 			data = JSON.parse(contentBuf.toString())
 		} catch (error) {
-			logger.error({ err: error, node }, 'Failed to parse mex newsletter notification')
+			logger.error({ err: error, node: binaryNodeToString(node) }, 'failed to parse mex newsletter notification')
 			return
 		}
 
@@ -789,7 +932,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				await handleNewsletterNotification(node)
 				break
 			case 'mex':
-				await handleMexNewsletterNotification(node)
+				await handleMexNotification(node)
 				break
 			case 'w:gp2':
 				// TODO: HANDLE PARTICIPANT_PN
