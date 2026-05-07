@@ -8,7 +8,6 @@ import {
 	DEF_TAG_PREFIX,
 	INITIAL_PREKEY_COUNT,
 	MIN_PREKEY_COUNT,
-	MIN_UPLOAD_INTERVAL,
 	NOISE_WA_HEADER,
 	PROCESSABLE_HISTORY_TYPES,
 	TimeMs,
@@ -27,6 +26,7 @@ import {
 	addTransactionCapability,
 	aesEncryptCTR,
 	bindWaitForConnectionUpdate,
+	buildPairingQRData,
 	bytesToCrockford,
 	configureSuccessfulPairing,
 	Curve,
@@ -35,14 +35,13 @@ import {
 	generateMdTagPrefix,
 	generateRegistrationNode,
 	getCodeFromWSError,
+	getCompanionPlatformId,
 	getErrorCodeFromStreamError,
 	getNextPreKeysNode,
 	makeEventBuffer,
 	makeNoiseHandler,
 	promiseTimeout,
 	signedKeyPair,
-	buildPairingQRData,
-	getCompanionPlatformId,
 	xmppSignedPreKey
 } from '../Utils'
 import {
@@ -177,9 +176,9 @@ export const makeSocket = (config: SocketConfig) => {
 				onErr = err => {
 					reject(
 						err ||
-						new Boom('Connection Closed', {
-							statusCode: DisconnectReason.connectionClosed
-						})
+							new Boom('Connection Closed', {
+								statusCode: DisconnectReason.connectionClosed
+							})
 					)
 				}
 
@@ -387,13 +386,7 @@ export const makeSocket = (config: SocketConfig) => {
 	let qrTimer: NodeJS.Timeout
 	let closed = false
 
-	/**
-	 * CONNECTION STABILITY: Track consecutive keepalive ping failures.
-	 * If pings fail repeatedly, the connection is likely dead even if
-	 * the WebSocket hasn't fired a 'close' event yet.
-	 */
-	let consecutivePingFailures = 0
-	const MAX_PING_FAILURES = 3
+	const socketEndHandlers: Array<(error: Error | undefined) => void | Promise<void>> = []
 
 	/** log & process any unexpected errors */
 	const onUnexpectedError = (err: Error | Boom, msg: string) => {
@@ -485,28 +478,18 @@ export const makeSocket = (config: SocketConfig) => {
 		return +countChild.attrs.value!
 	}
 
-	// Pre-key upload state management
+	// WAWeb has no time throttle here; the server drives uploads via PreKeyLow notifications.
 	let uploadPreKeysPromise: Promise<void> | null = null
-	let lastUploadTime = 0
 
 	/** generates and uploads a set of pre-keys to the server */
-	const uploadPreKeys = async (count = MIN_PREKEY_COUNT, retryCount = 0) => {
-		// Check minimum interval (except for retries)
-		if (retryCount === 0) {
-			const timeSinceLastUpload = Date.now() - lastUploadTime
-			if (timeSinceLastUpload < MIN_UPLOAD_INTERVAL) {
-				logger.debug(`Skipping upload, only ${timeSinceLastUpload}ms since last upload`)
-				return
-			}
-		}
-
-		// Prevent multiple concurrent uploads
+	const uploadPreKeys = async (count = MIN_PREKEY_COUNT) => {
 		if (uploadPreKeysPromise) {
 			logger.debug('Pre-key upload already in progress, waiting for completion')
 			await uploadPreKeysPromise
+			return
 		}
 
-		const uploadLogic = async () => {
+		const uploadLogic = async (retryCount: number): Promise<void> => {
 			logger.info({ count, retryCount }, 'uploading pre-keys')
 
 			// Generate and save pre-keys atomically (prevents ID collisions on retry)
@@ -515,23 +498,22 @@ export const makeSocket = (config: SocketConfig) => {
 				const { update, node } = await getNextPreKeysNode({ creds, keys }, count)
 				// Update credentials immediately to prevent duplicate IDs on retry
 				ev.emit('creds.update', update)
-				return node // Only return node since update is already used
+				return node
 			}, creds?.me?.id || 'upload-pre-keys')
 
 			// Upload to server (outside transaction, can fail without affecting local keys)
 			try {
 				await query(node)
 				logger.info({ count }, 'uploaded pre-keys successfully')
-				lastUploadTime = Date.now()
 			} catch (uploadError) {
 				logger.error({ uploadError: (uploadError as Error).toString(), count }, 'Failed to upload pre-keys to server')
 
-				// Exponential backoff retry (max 3 retries)
+				// Recurse into uploadLogic; calling uploadPreKeys would await its own in-flight promise.
 				if (retryCount < 3) {
 					const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 10000)
 					logger.info(`Retrying pre-key upload in ${backoffDelay}ms`)
 					await new Promise(resolve => setTimeout(resolve, backoffDelay))
-					return uploadPreKeys(count, retryCount + 1)
+					return uploadLogic(retryCount + 1)
 				}
 
 				throw uploadError
@@ -540,7 +522,7 @@ export const makeSocket = (config: SocketConfig) => {
 
 		// Add timeout protection
 		uploadPreKeysPromise = Promise.race([
-			uploadLogic(),
+			uploadLogic(0),
 			new Promise<void>((_, reject) =>
 				setTimeout(() => reject(new Boom('Pre-key upload timeout', { statusCode: 408 })), UPLOAD_TIMEOUT)
 			)
@@ -645,47 +627,26 @@ export const makeSocket = (config: SocketConfig) => {
 		closed = true
 		logger.info({ trace: error?.stack }, error ? 'connection errored' : 'connection closed')
 
-		// CONNECTION STABILITY: Clear all timers to prevent callbacks firing
-		// after the connection is torn down.
-		clearTimeout(keepAliveReq)
+		clearInterval(keepAliveReq)
 		clearTimeout(qrTimer)
 
-		// CONNECTION STABILITY: Reset keepalive state so a stale counter
-		// doesn't carry over if the socket object is somehow reused.
-		consecutivePingFailures = 0
+		ws.removeAllListeners('close')
+		ws.removeAllListeners('open')
+		ws.removeAllListeners('message')
 
-		/**
-		 * CONNECTION STABILITY: Remove ALL listeners from the WebSocket,
-		 * not just 'close', 'open', 'message'. The CB: prefixed listeners
-		 * (CB:message, CB:call, CB:receipt, CB:notification, etc.) registered
-		 * by messages-recv.ts hold closures over the entire socket scope.
-		 * Leaving them attached prevents garbage collection of the old
-		 * connection's state and can cause handlers to fire on stale data
-		 * if close/reconnect races occur.
-		 */
-		ws.removeAllListeners()
+		signalRepository.close?.()
 
-		// CONNECTION STABILITY: Flush any pending buffered events before
-		// emitting the close, so consumers see all events that arrived
-		// before the disconnect. Then destroy the buffer to release memory.
-		if (ev.isBuffering()) {
-			ev.flush()
-		}
-
-		/**
-		 * CONNECTION STABILITY: Add a timeout on ws.close() to prevent
-		 * hanging indefinitely if the underlying TCP socket is stuck.
-		 * A 5-second timeout is generous enough for a clean close but
-		 * prevents zombie connections from blocking shutdown.
-		 */
 		if (!ws.isClosed && !ws.isClosing) {
 			try {
-				await Promise.race([
-					ws.close(),
-					new Promise<void>(resolve => setTimeout(resolve, 5000))
-				])
-			} catch {
-				// Ignore close errors — we're tearing down anyway
+				await ws.close()
+			} catch {}
+		}
+
+		for (const handler of socketEndHandlers) {
+			try {
+				await handler(error)
+			} catch (err) {
+				logger.error({ err }, 'error in socket end handler')
 			}
 		}
 
@@ -696,21 +657,8 @@ export const makeSocket = (config: SocketConfig) => {
 				date: new Date()
 			}
 		})
-
-		/**
-		 * CONNECTION STABILITY: Release noise handler internal state
-		 * (encryption buffers, transport state, pending frame callbacks).
-		 * Without this, the noise handler's inBytes buffer and transport
-		 * encryption keys remain in memory after disconnect.
-		 */
-		noise.destroy()
-
-		/**
-		 * CONNECTION STABILITY: Remove all event listeners to allow GC.
-		 * This clears connection.update listeners AND any process/handler
-		 * listeners registered via ev.on() throughout the socket layers.
-		 */
 		ev.removeAllListeners('connection.update')
+		ev.destroy()
 	}
 
 	const waitForSocketOpen = async () => {
@@ -737,88 +685,37 @@ export const makeSocket = (config: SocketConfig) => {
 		})
 	}
 
-	/**
-	 * CONNECTION STABILITY: Keepalive uses recursive setTimeout instead of
-	 * setInterval to prevent overlapping pings. Tracks consecutive failures
-	 * and terminates the connection after MAX_PING_FAILURES consecutive
-	 * failed pings, which detects dead connections even when the OS-level
-	 * TCP socket hasn't timed out yet.
-	 */
-	const startKeepAliveRequest = () => {
-		const scheduleNextPing = () => {
-			keepAliveReq = setTimeout(async () => {
-				if (closed) {
-					return
-				}
+	const startKeepAliveRequest = () =>
+		(keepAliveReq = setInterval(() => {
+			if (!lastDateRecv) {
+				lastDateRecv = new Date()
+			}
 
-				if (!lastDateRecv) {
-					lastDateRecv = new Date()
-				}
-
-				const diff = Date.now() - lastDateRecv.getTime()
-
-				/*
-				 * If the time since last received message exceeds twice the
-				 * keepalive interval, the connection is almost certainly dead.
-				 * This is a hard timeout that catches cases where pings never
-				 * even get sent (e.g. event loop blocked).
-				 */
-				if (diff > keepAliveIntervalMs * 2 + 5000) {
-					logger.warn({ diff, keepAliveIntervalMs }, 'connection silent for too long')
-					void end(new Boom('Connection was lost', { statusCode: DisconnectReason.connectionLost }))
-					return
-				}
-
-				if (ws.isOpen) {
-					try {
-						await query({
-							tag: 'iq',
-							attrs: {
-								id: generateMessageTag(),
-								to: S_WHATSAPP_NET,
-								type: 'get',
-								xmlns: 'w:p'
-							},
-							content: [{ tag: 'ping', attrs: {} }]
-						})
-						// Ping succeeded — reset failure counter
-						consecutivePingFailures = 0
-					} catch (err) {
-						consecutivePingFailures++
-						logger.error(
-							{ trace: (err as Error).stack, consecutivePingFailures, maxFailures: MAX_PING_FAILURES },
-							'error in sending keep alive'
-						)
-
-						/*
-						 * CONNECTION STABILITY: After MAX_PING_FAILURES consecutive
-						 * failures, the server is not responding. Terminate the
-						 * connection so the caller can reconnect cleanly rather
-						 * than sitting on a zombie socket.
-						 */
-						if (consecutivePingFailures >= MAX_PING_FAILURES) {
-							logger.warn('max ping failures reached, terminating connection')
-							void end(
-								new Boom('Connection was lost (ping failures)', {
-									statusCode: DisconnectReason.connectionLost
-								})
-							)
-							return
-						}
-					}
-				} else {
-					logger.warn('keep alive called when WS not open')
-				}
-
-				// Schedule next ping only if connection is still alive
-				if (!closed) {
-					scheduleNextPing()
-				}
-			}, keepAliveIntervalMs)
-		}
-
-		scheduleNextPing()
-	}
+			const diff = Date.now() - lastDateRecv.getTime()
+			/*
+				check if it's been a suspicious amount of time since the server responded with our last seen
+				it could be that the network is down
+			*/
+			if (diff > keepAliveIntervalMs + 5000) {
+				void end(new Boom('Connection was lost', { statusCode: DisconnectReason.connectionLost }))
+			} else if (ws.isOpen) {
+				// if its all good, send a keep alive request
+				query({
+					tag: 'iq',
+					attrs: {
+						id: generateMessageTag(),
+						to: S_WHATSAPP_NET,
+						type: 'get',
+						xmlns: 'w:p'
+					},
+					content: [{ tag: 'ping', attrs: {} }]
+				}).catch(err => {
+					logger.error({ trace: err.stack }, 'error in sending keep alive')
+				})
+			} else {
+				logger.warn('keep alive called when WS not open')
+			}
+		}, keepAliveIntervalMs))
 	/** i have no idea why this exists. pls enlighten me */
 	const sendPassiveIq = (tag: 'passive' | 'active') =>
 		query({
@@ -1209,6 +1106,10 @@ export const makeSocket = (config: SocketConfig) => {
 		}
 	}
 
+	const registerSocketEndHandler = (handler: (error: Error | undefined) => void | Promise<void>) => {
+		socketEndHandlers.push(handler)
+	}
+
 	/**
 	 * Fetches your account's standing when it comes to restrictions.
 	 * @returns Returns the state of the restrictions.
@@ -1254,18 +1155,6 @@ export const makeSocket = (config: SocketConfig) => {
 		get user() {
 			return authState.creds.me
 		},
-		/**
-		 * CONNECTION STABILITY: Expose connection health metrics so
-		 * consumers can implement their own health checks or monitoring.
-		 * - lastMessageReceived: timestamp of last data from server
-		 * - consecutivePingFailures: how many pings have failed in a row
-		 */
-		get connectionHealth() {
-			return {
-				lastMessageReceived: lastDateRecv,
-				consecutivePingFailures
-			}
-		},
 		generateMessageTag,
 		query,
 		waitForMessage,
@@ -1274,6 +1163,7 @@ export const makeSocket = (config: SocketConfig) => {
 		sendNode,
 		logout,
 		end,
+		registerSocketEndHandler,
 		onUnexpectedError,
 		uploadPreKeys,
 		uploadPreKeysToServerIfRequired,

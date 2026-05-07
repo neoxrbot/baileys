@@ -52,12 +52,12 @@ import {
 	type BinaryNode,
 	getBinaryNodeChild,
 	getBinaryNodeChildren,
+	isHostedLidUser,
+	isHostedPnUser,
 	isLidUser,
 	isPnUser,
 	jidDecode,
 	jidNormalizedUser,
-	isHostedLidUser,
-	isHostedPnUser,
 	reduceBinaryNodeToDictionary,
 	S_WHATSAPP_NET
 } from '../WABinary'
@@ -84,7 +84,8 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		query,
 		signalRepository,
 		onUnexpectedError,
-		sendUnifiedSession
+		sendUnifiedSession,
+		registerSocketEndHandler
 	} = sock
 
 	const getLIDForPN = signalRepository.lidMapping.getLIDForPN.bind(signalRepository.lidMapping)
@@ -135,10 +136,6 @@ export const makeChatsSocket = (config: SocketConfig) => {
 			stdTTL: DEFAULT_CACHE_TTLS.MSG_RETRY, // 1 hour
 			useClones: false
 		}) as CacheStore)
-
-	if (!config.placeholderResendCache) {
-		config.placeholderResendCache = placeholderResendCache
-	}
 
 	/** helper function to fetch the given app state sync key */
 	const getAppStateSyncKey = async (keyId: string) => {
@@ -464,7 +461,6 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		})
 	}
 
-
 	const getBusinessProfile = async (jid: string): Promise<WABusinessProfile | void> => {
 		const results = await query({
 			tag: 'iq',
@@ -647,7 +643,8 @@ export const makeChatsSocket = (config: SocketConfig) => {
 									snapshot,
 									getCachedAppStateSyncKey,
 									initialVersionMap[name],
-									appStateMacVerification.snapshot
+									appStateMacVerification.snapshot,
+									logger
 								)
 								states[name] = newState
 								Object.assign(globalMutationMap, mutationMap)
@@ -976,6 +973,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		}
 	}
 
+	/** fetch AB props */
 	const fetchProps = async () => {
 		const resultNode = await query({
 			tag: 'iq',
@@ -1214,7 +1212,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		const historyMsg = getHistoryMsg(msg.message!)
 		const shouldProcessHistoryMsg = historyMsg
 			? shouldSyncHistoryMessage(historyMsg) &&
-			PROCESSABLE_HISTORY_TYPES.includes(historyMsg.syncType! as proto.HistorySync.HistorySyncType)
+				PROCESSABLE_HISTORY_TYPES.includes(historyMsg.syncType! as proto.HistorySync.HistorySyncType)
 			: false
 
 		if (historyMsg && shouldProcessHistoryMsg) {
@@ -1459,6 +1457,20 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		}
 	})
 
+	registerSocketEndHandler(() => {
+		if (awaitingSyncTimeout) {
+			clearTimeout(awaitingSyncTimeout)
+			awaitingSyncTimeout = undefined
+		}
+
+		if (!config.placeholderResendCache && placeholderResendCache.close) {
+			placeholderResendCache.close()
+		}
+
+		syncState = SyncState.Connecting
+		privacySettings = undefined
+	})
+
 	return {
 		...sock,
 		serverProps,
@@ -1498,6 +1510,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		cleanDirtyBits,
 		addOrEditContact,
 		removeContact,
+		placeholderResendCache,
 		addLabel,
 		addChatLabel,
 		removeChatLabel,
