@@ -31,6 +31,7 @@ export type BaileysEventMap = {
 		isLatest?: boolean
 		progress?: number | null
 		syncType?: proto.HistorySync.HistorySyncType | null
+		pastParticipants?: proto.IPastParticipants[] | null
 		chunkOrder?: number | null
 		peerDataRequestSessionId?: string | null
 	}
@@ -122,23 +123,24 @@ export type BaileysEventMap = {
 	'newsletter-settings.update': { id: string; update: any }
 
 	'message-capping.update': NewChatMessageCapInfo
+
 	/** Settings and actions sync events */
 	'chats.lock': { id: string; locked: boolean }
 	'settings.update':
-	| { setting: 'unarchiveChats'; value: boolean }
-	| { setting: 'locale'; value: string }
-	| { setting: 'disableLinkPreviews'; value: proto.SyncActionValue.IPrivacySettingDisableLinkPreviewsAction }
-	| { setting: 'timeFormat'; value: proto.SyncActionValue.ITimeFormatAction }
-	| { setting: 'privacySettingRelayAllCalls'; value: proto.SyncActionValue.IPrivacySettingRelayAllCalls }
-	| { setting: 'statusPrivacy'; value: proto.SyncActionValue.IStatusPrivacyAction }
-	| {
-		setting: 'notificationActivitySetting'
-		value: proto.SyncActionValue.NotificationActivitySettingAction.NotificationActivitySetting
-	}
-	| {
-		setting: 'channelsPersonalisedRecommendation'
-		value: proto.SyncActionValue.IPrivacySettingChannelsPersonalisedRecommendationAction
-	}
+		| { setting: 'unarchiveChats'; value: boolean }
+		| { setting: 'locale'; value: string }
+		| { setting: 'disableLinkPreviews'; value: proto.SyncActionValue.IPrivacySettingDisableLinkPreviewsAction }
+		| { setting: 'timeFormat'; value: proto.SyncActionValue.ITimeFormatAction }
+		| { setting: 'privacySettingRelayAllCalls'; value: proto.SyncActionValue.IPrivacySettingRelayAllCalls }
+		| { setting: 'statusPrivacy'; value: proto.SyncActionValue.IStatusPrivacyAction }
+		| {
+				setting: 'notificationActivitySetting'
+				value: proto.SyncActionValue.NotificationActivitySettingAction.NotificationActivitySetting
+		  }
+		| {
+				setting: 'channelsPersonalisedRecommendation'
+				value: proto.SyncActionValue.IPrivacySettingChannelsPersonalisedRecommendationAction
+		  }
 }
 
 export type BufferedEventData = {
@@ -150,6 +152,7 @@ export type BufferedEventData = {
 		isLatest: boolean
 		progress?: number | null
 		syncType?: proto.HistorySync.HistorySyncType
+		pastParticipants?: proto.IPastParticipants[]
 		chunkOrder?: number | null
 		peerDataRequestSessionId?: string
 	}
