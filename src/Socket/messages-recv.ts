@@ -2029,6 +2029,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		await processNode('message', node, 'processing message', handleMessage)
 	})
 
+	ws.on('CB:status', (node) => {
+		const hasEnc = Array.isArray(node.content) && node.content.some((c: any) => c.tag === 'enc')
+		if (!node.attrs?.from?.endsWith('@g.us') || !hasEnc) return
+		processNodeWithBuffer(node, 'processing group status', handleMessage)
+	})
+
 	ws.on('CB:call', async (node: BinaryNode) => {
 		await processNode('call', node, 'handling call', handleCall)
 	})
