@@ -5,7 +5,7 @@
     "allowImportingTsExtensions": false,
     // "outDir": "../b/lib",
     // "outDir": "../v5.1-optima/node_modules/baileys/lib",
-    "outDir": "../neoxr-bot/node_modules/baileys/lib",
+    "outDir": "../selfbot/node_modules/baileys/lib",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true
