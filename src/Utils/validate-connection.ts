@@ -14,9 +14,15 @@ import { encodeBigEndian } from './generics'
 import { createSignalIdentity } from './signal'
 
 const getUserAgent = (config: SocketConfig): proto.ClientPayload.IUserAgent => {
-	const PLATFORM_MAP = config.browser[1].toLocaleLowerCase().includes('android')
-		? proto.ClientPayload.UserAgent.Platform.ANDROID
-		: proto.ClientPayload.UserAgent.Platform.WEB
+	const Platform = proto.ClientPayload.UserAgent.Platform
+
+	const defaultPlatform = config.browser[1].toLowerCase().includes('android')
+		? Platform.ANDROID
+		: Platform.WEB
+
+	const platform = config.platform
+		? (Platform as any)[config.platform] ?? defaultPlatform
+		: defaultPlatform
 
 	return {
 		appVersion: {
@@ -24,13 +30,12 @@ const getUserAgent = (config: SocketConfig): proto.ClientPayload.IUserAgent => {
 			secondary: config.version[1],
 			tertiary: config.version[2]
 		},
-		platform: (proto.ClientPayload.UserAgent.Platform[config?.platform || PLATFORM_MAP] || PLATFORM_MAP) as any,
+		platform,
 		releaseChannel: proto.ClientPayload.UserAgent.ReleaseChannel.RELEASE,
 		osVersion: '0.1',
 		device: 'Desktop',
 		osBuildNumber: '0.1',
 		localeLanguageIso6391: 'en',
-
 		mnc: '000',
 		mcc: '000',
 		localeCountryIso31661Alpha2: config.countryCode
