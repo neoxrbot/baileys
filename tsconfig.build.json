@@ -3,9 +3,9 @@
   "compilerOptions": {
     "noEmit": false,
     "allowImportingTsExtensions": false,
-    // "outDir": "../bail/lib",
+    "outDir": "../bail/lib",
     // "outDir": "../v5.1-optima/node_modules/baileys/lib",
-    "outDir": "../selfbot/node_modules/baileys/lib",
+    // "outDir": "../selfbot/node_modules/baileys/lib",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true
